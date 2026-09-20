@@ -89,8 +89,8 @@ class Database:
             return
 
         productos_prueba = [
-            ("Refresco SEMENNNN LOL 600ml",     1.25,  50),
-            ("Agua NORMAL 1L",     0.75,  80),
+            ("Coca Cola 600ml",     1.25,  50),
+            ("Agua Cristal 1L",     0.75,  80),
             ("Pan Frances BIEN RICO JEJE (unidad)",    0.15, 200),
             ("Papas Fritas 45g",        0.90,  60),
             ("Cafe Molido 250g",        3.50,  25),
