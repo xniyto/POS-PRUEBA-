@@ -1,12 +1,11 @@
 ====== MI NEGOCIO ======
-Fecha: 2026-09-20 14:55:35
+Fecha: 2026-09-20 15:01:30
 Cajero: admin
 ------------------------
-2x Pan Francés (un... $0.30
-1x Papas Fritas 45... $0.90
+1x Agua Cristal 1L... $0.75
 1x Café Molido 250... $3.50
 ------------------------
-Subtotal: $4.70
-IVA: $0.61
-TOTAL: $5.31
+Subtotal: $4.25
+IVA: $0.55
+TOTAL: $4.80
 ========================
