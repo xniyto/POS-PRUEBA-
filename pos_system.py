@@ -89,7 +89,7 @@ class Database:
             return
 
         productos_prueba = [
-            ("Refresco Cola 600ml",     1.25,  50),
+            ("Refresco SEMENNNN LOL 600ml",     1.25,  50),
             ("Agua Embotellada 1L",     0.75,  80),
             ("Pan Frances (unidad)",    0.15, 200),
             ("Papas Fritas 45g",        0.90,  60),
