@@ -31,6 +31,8 @@ class Database:
         self.insertar_datos_iniciales()
 
     def crear_tablas(self):
+        """Crea las tablas iniciales y aplica migraciones si el archivo .db es de una versión vieja."""
+        # 1. Creación de la estructura base
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS Usuarios (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,12 +52,23 @@ class Database:
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS Ventas (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                usuario_id INTEGER,
                 fecha TEXT NOT NULL,
-                total REAL NOT NULL,
-                FOREIGN KEY(usuario_id) REFERENCES Usuarios(id)
+                total REAL NOT NULL
+                -- Nota: usuario_id se añade dinámicamente si falta
             )
         """)
+        
+        # 2. MIGRACIONES (Actualización silenciosa de bases de datos viejas)
+        # Intentamos agregar la nueva columna 'usuario_id'. 
+        # Si la columna ya existe, SQLite lanzará un error (OperationalError).
+        # Lo capturamos y lo ignoramos, así el programa sigue funcionando sin molestar al cliente.
+        try:
+            self.cursor.execute("ALTER TABLE Ventas ADD COLUMN usuario_id INTEGER REFERENCES Usuarios(id)")
+            print("[MIGRACIÓN] Columna 'usuario_id' agregada exitosamente a la tabla Ventas existente.")
+        except sqlite3.OperationalError:
+            # La columna ya existe, no hay que hacer nada.
+            pass
+
         self.conexion.commit()
 
     def insertar_datos_iniciales(self):
