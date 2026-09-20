@@ -90,8 +90,8 @@ class Database:
 
         productos_prueba = [
             ("Refresco SEMENNNN LOL 600ml",     1.25,  50),
-            ("Agua Embotellada 1L",     0.75,  80),
-            ("Pan Frances (unidad)",    0.15, 200),
+            ("Agua NORMAL 1L",     0.75,  80),
+            ("Pan Frances BIEN RICO JEJE (unidad)",    0.15, 200),
             ("Papas Fritas 45g",        0.90,  60),
             ("Cafe Molido 250g",        3.50,  25),
             ("Chicle Menta",            0.50, 100),
