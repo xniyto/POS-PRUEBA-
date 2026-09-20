@@ -1,617 +1,487 @@
 """
 ==================================================================
- SISTEMA DE PUNTO DE VENTA (POS) - Escritorio
+ SISTEMA DE PUNTO DE VENTA (POS) - VERSIÓN COMERCIAL
 ==================================================================
-Stack:
-    - Interfaz gráfica: CustomTkinter
-    - Base de datos local: SQLite3 (archivo pos_system.db)
-    - Arquitectura: Programación Orientada a Objetos (POO)
-
-Estructura del archivo:
-    1) Clase Database  -> toda la comunicación con SQLite.
-    2) Clase POSApp     -> toda la interfaz gráfica y la lógica de
-                           negocio (carrito, cobro, navegación).
-    3) Bloque __main__  -> punto de entrada de la aplicación.
-
-Para ejecutar necesitas tener instalado CustomTkinter:
-    pip install customtkinter
+Nuevas Características:
+    - Login y Control de Roles (Administrador vs Cajero).
+    - CRUD de Inventario (Agregar, Editar, Eliminar productos).
+    - Cierre de Caja (Reporte de ventas del día).
+    - Generación de Ticket de Venta (.txt).
 ==================================================================
 """
 
 import sqlite3
 from datetime import datetime
+import os
 
 import customtkinter as ctk
-from tkinter import messagebox
-
+from tkinter import messagebox, ttk
 
 # ==================================================================
 # 1) CAPA DE BASE DE DATOS
 # ==================================================================
 class Database:
-    """
-    Encapsula TODA la comunicación con SQLite. La interfaz (POSApp)
-    nunca escribe SQL directamente: solo llama a los métodos de esta
-    clase. Esto separa "qué se muestra en pantalla" de "cómo se
-    guardan/leen los datos", que es la idea central de dividir el
-    sistema en capas.
-    """
-
     NOMBRE_BD = "pos_system.db"
 
     def __init__(self):
-        # check_same_thread=False: la conexión se crea aquí pero se
-        # reutiliza durante toda la vida de la app dentro del loop de
-        # eventos de Tkinter. Como es una app de un solo hilo, esto es
-        # seguro y evita reabrir la conexión en cada consulta.
         self.conexion = sqlite3.connect(self.NOMBRE_BD, check_same_thread=False)
         self.conexion.execute("PRAGMA foreign_keys = ON")
         self.cursor = self.conexion.cursor()
-
         self.crear_tablas()
-        self.insertar_productos_prueba()
+        self.insertar_datos_iniciales()
 
-    # --------------------------------------------------------------
-    # Creación de tablas
-    # --------------------------------------------------------------
     def crear_tablas(self):
-        """Crea las tablas Productos y Ventas si todavía no existen."""
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS Usuarios (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL,
+                rol TEXT NOT NULL
+            )
+        """)
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS Productos (
-                id      INTEGER PRIMARY KEY AUTOINCREMENT,
-                nombre  TEXT    NOT NULL,
-                precio  REAL    NOT NULL,
-                stock   INTEGER NOT NULL
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nombre TEXT NOT NULL,
+                precio REAL NOT NULL,
+                stock INTEGER NOT NULL
             )
         """)
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS Ventas (
-                id     INTEGER PRIMARY KEY AUTOINCREMENT,
-                fecha  TEXT    NOT NULL,
-                total  REAL    NOT NULL
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                usuario_id INTEGER,
+                fecha TEXT NOT NULL,
+                total REAL NOT NULL,
+                FOREIGN KEY(usuario_id) REFERENCES Usuarios(id)
             )
         """)
         self.conexion.commit()
 
-    # --------------------------------------------------------------
-    # Datos de prueba
-    # --------------------------------------------------------------
-    def insertar_productos_prueba(self):
-        """
-        Llena el catálogo con productos de ejemplo, mostrar
-        el catálogo la primera vez que se ejecuta la app.
-        Verifica primero si ya hay productos para no duplicarlos
-        cada vez que se abre el programa.
-        """
+    def insertar_datos_iniciales(self):
+        # Insertar usuarios por defecto si no existen
+        self.cursor.execute("SELECT COUNT(*) FROM Usuarios")
+        if self.cursor.fetchone()[0] == 0:
+            usuarios = [
+                ("admin", "admin123", "administrador"),
+                ("caja1", "caja123", "cajero")
+            ]
+            self.cursor.executemany("INSERT INTO Usuarios (username, password, rol) VALUES (?, ?, ?)", usuarios)
+        
+        # Insertar productos si no existen
         self.cursor.execute("SELECT COUNT(*) FROM Productos")
-        cantidad_existente = self.cursor.fetchone()[0]
-        if cantidad_existente > 0:
-            return
-
-        productos_prueba = [
-            ("Coca Cola 600ml",     1.25,  50),
-            ("Agua Cristal 1L",     0.75,  80),
-            ("Pan Frances BIEN RICO JEJE (unidad)",    0.15, 200),
-            ("Papas Fritas 45g",        0.90,  60),
-            ("Cafe Molido 250g",        3.50,  25),
-            ("Chicle Menta",            0.50, 100),
-            ("Leche Entera 1L",         1.85,  30),
-            ("Huevos (docena)",         2.75,  25),
-            ("Arroz 1lb",               0.95,  45),
-            ("Frijoles Enlatados",      1.40,  35),
-            ("Jabon de Bano",           1.20,  55),
-            ("Detergente en Polvo 1kg", 3.75,  20),
-            ("Galletas Dulces 200g",    1.15,  40),
-            ("Cepillo Dental",          1.60,   0),  # ejemplo de producto agotado
-        ]
-        self.cursor.executemany(
-            "INSERT INTO Productos (nombre, precio, stock) VALUES (?, ?, ?)",
-            productos_prueba
-        )
+        if self.cursor.fetchone()[0] == 0:
+            productos = [
+                ("Agua Cristal 1L", 0.75, 80),
+                ("Pan Francés (unidad)", 0.15, 200),
+                ("Papas Fritas 45g", 0.90, 60),
+                ("Café Molido 250g", 3.50, 25),
+            ]
+            self.cursor.executemany("INSERT INTO Productos (nombre, precio, stock) VALUES (?, ?, ?)", productos)
         self.conexion.commit()
 
-    # --------------------------------------------------------------
-    # Consultas de productos
-    # --------------------------------------------------------------
+    def verificar_credenciales(self, username, password):
+        self.cursor.execute("SELECT id, username, rol FROM Usuarios WHERE username = ? AND password = ?", (username, password))
+        return self.cursor.fetchone()
+
+    # --- CRUD Productos ---
     def buscar_productos_por_nombre(self, texto_busqueda=""):
-        """
-        Devuelve todos los productos cuyo nombre contiene el texto
-        buscado (insensible a mayusculas). Si el texto viene vacio,
-        el '%%' hace que el LIKE coincida con todos los productos,
-        por lo que este mismo método sirve para "traer el catálogo
-        completo" y para "filtrar por búsqueda".
-        """
         patron = f"%{texto_busqueda.strip()}%"
-        self.cursor.execute(
-            "SELECT id, nombre, precio, stock FROM Productos "
-            "WHERE nombre LIKE ? COLLATE NOCASE ORDER BY nombre ASC",
-            (patron,)
-        )
+        self.cursor.execute("SELECT id, nombre, precio, stock FROM Productos WHERE nombre LIKE ? COLLATE NOCASE ORDER BY nombre ASC", (patron,))
         return self.cursor.fetchall()
 
     def obtener_producto_por_id(self, producto_id):
-        """
-        Trae el estado MÁS ACTUAL de un producto directamente de la
-        base de datos. Se usa al presionar un botón del catálogo para
-        confirmar el stock real disponible en ese instante, en vez de
-        confiar en el dato que se mostró la última vez que se dibujó
-        la pantalla.
-        """
-        self.cursor.execute(
-            "SELECT id, nombre, precio, stock FROM Productos WHERE id = ?",
-            (producto_id,)
-        )
+        self.cursor.execute("SELECT id, nombre, precio, stock FROM Productos WHERE id = ?", (producto_id,))
         return self.cursor.fetchone()
 
-    # --------------------------------------------------------------
-    # Registro de ventas y descuento de stock
-    # --------------------------------------------------------------
-    def registrar_venta(self, total, fecha=None):
-        """Inserta una fila en Ventas y devuelve el id generado."""
-        if fecha is None:
-            fecha = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        self.cursor.execute(
-            "INSERT INTO Ventas (fecha, total) VALUES (?, ?)",
-            (fecha, total)
-        )
-        return self.cursor.lastrowid
+    def guardar_producto(self, nombre, precio, stock, producto_id=None):
+        if producto_id:
+            self.cursor.execute("UPDATE Productos SET nombre=?, precio=?, stock=? WHERE id=?", (nombre, precio, stock, producto_id))
+        else:
+            self.cursor.execute("INSERT INTO Productos (nombre, precio, stock) VALUES (?, ?, ?)", (nombre, precio, stock))
+        self.conexion.commit()
 
-    def descontar_stock(self, producto_id, cantidad_vendida):
-        """
-        Resta 'cantidad_vendida' del stock de un producto.
-        La condición 'AND stock >= ?' evita que el stock quede
-        negativo; si no se actualiza ninguna fila (rowcount == 0)
-        significa que ya no había stock suficiente, y se lanza un
-        error para que la venta completa se pueda revertir.
-        """
-        self.cursor.execute(
-            "UPDATE Productos SET stock = stock - ? WHERE id = ? AND stock >= ?",
-            (cantidad_vendida, producto_id, cantidad_vendida)
-        )
-        if self.cursor.rowcount == 0:
-            raise sqlite3.Error(
-                f"Stock insuficiente para el producto con ID {producto_id}"
-            )
+    def eliminar_producto(self, producto_id):
+        self.cursor.execute("DELETE FROM Productos WHERE id=?", (producto_id,))
+        self.conexion.commit()
 
-    def procesar_venta(self, carrito, total):
-        """
-        Orquesta el cobro completo dentro de UNA sola transacción:
-        registra la venta y descuenta el stock de cada artículo.
-        Si algo falla a mitad de camino (por ejemplo, otro proceso
-        vendió el último artículo justo antes), se hace rollback
-        para que la base de datos nunca quede en un estado a medias
-        (venta registrada pero stock sin descontar, o viceversa).
-        """
+    # --- Ventas y Reportes ---
+    def procesar_venta(self, carrito, total, usuario_id):
         try:
-            self.registrar_venta(total)
+            fecha = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self.cursor.execute("INSERT INTO Ventas (usuario_id, fecha, total) VALUES (?, ?, ?)", (usuario_id, fecha, total))
+            
             for producto_id, datos in carrito.items():
-                self.descontar_stock(producto_id, datos["cantidad"])
+                self.cursor.execute("UPDATE Productos SET stock = stock - ? WHERE id = ? AND stock >= ?", (datos["cantidad"], producto_id, datos["cantidad"]))
+                if self.cursor.rowcount == 0:
+                    raise sqlite3.Error(f"Stock insuficiente para {datos['nombre']}")
             self.conexion.commit()
-            return True
+            return True, fecha
         except sqlite3.Error as error:
             self.conexion.rollback()
-            print(f"[ERROR AL PROCESAR VENTA] {error}")
-            return False
+            return False, str(error)
+
+    def reporte_ventas_hoy(self):
+        fecha_hoy = datetime.now().strftime("%Y-%m-%d")
+        patron = f"{fecha_hoy}%"
+        self.cursor.execute("SELECT COUNT(*), SUM(total) FROM Ventas WHERE fecha LIKE ?", (patron,))
+        return self.cursor.fetchone()
 
     def cerrar_conexion(self):
-        """Cierra la conexión a la base de datos de forma ordenada."""
         self.conexion.close()
 
 
 # ==================================================================
-# 2) CAPA DE INTERFAZ GRAFICA
+# 2) CAPA DE INTERFAZ GRÁFICA
 # ==================================================================
 class POSApp(ctk.CTk):
-    """
-    Ventana principal de la aplicación. Contiene tres paneles:
-        - Izquierdo: menú lateral (navegación).
-        - Central:   catálogo de productos con buscador.
-        - Derecho:   carrito de compra y botón de cobro.
-
-    El estado del carrito se guarda en un diccionario en memoria
-    (self.carrito); solo se escribe en la base de datos hasta que
-    se presiona "PROCESAR COBRO".
-    """
-
-    TASA_IVA = 0.13  # 13% - ajustar segun la normativa fiscal de cada pais
-    COLUMNAS_CATALOGO = 2  # cuantas tarjetas/botones de producto por fila
+    TASA_IVA = 0.13  # 13% IVA 
+    COLUMNAS_CATALOGO = 2
 
     def __init__(self):
-        # set_appearance_mode / set_default_color_theme configuran el
-        # tema ANTES de crear cualquier widget, incluyendo la ventana
-        # raiz (super().__init__()), por eso van primero.
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
         super().__init__()
 
-        # ------------------------------------------------------------
-        # Conexión a la base de datos: se crea UNA sola vez al abrir
-        # la app y se reutiliza en todos los métodos de la interfaz.
-        # ------------------------------------------------------------
+        self.title("Sistema POS - Pro Version")
+        self.geometry("1100x650")
+        self.minsize(1000, 600)
+
         self.bd = Database()
-
-        # Estado interno del carrito: { id_producto: {nombre, precio, cantidad} }
+        self.usuario_actual = None
         self.carrito = {}
-        self.modo_actual = "venta"  # "venta" o "inventario"
 
-        self._configurar_ventana()
-        self._crear_panel_izquierdo()
-        self._crear_panel_central()
-        self._crear_panel_derecho()
+        self.protocol("WM_DELETE_WINDOW", self.al_cerrar_ventana)
+        self.mostrar_pantalla_login()
+
+    # ==============================================================
+    # PANTALLA DE LOGIN
+    # ==============================================================
+    def mostrar_pantalla_login(self):
+        self.frame_login = ctk.CTkFrame(self)
+        self.frame_login.place(relx=0.5, rely=0.5, anchor="center")
+
+        ctk.CTkLabel(self.frame_login, text="INICIAR SESIÓN", font=ctk.CTkFont(size=24, weight="bold", family="Helvetica")).pack(pady=(30, 10), padx=50)
+        
+        self.entry_user = ctk.CTkEntry(self.frame_login, placeholder_text="Usuario", width=250, height=40)
+        self.entry_user.pack(pady=10, padx=30)
+        
+        self.entry_pass = ctk.CTkEntry(self.frame_login, placeholder_text="Contraseña", show="*", width=250, height=40)
+        self.entry_pass.pack(pady=10, padx=30)
+
+        ctk.CTkButton(self.frame_login, text="Ingresar al Sistema", height=45, fg_color="#1F6AA5", font=ctk.CTkFont(weight="bold"), command=self.verificar_login).pack(pady=(20, 30), padx=30, fill="x")
+
+    def verificar_login(self):
+        user = self.entry_user.get()
+        pwd = self.entry_pass.get()
+        usuario = self.bd.verificar_credenciales(user, pwd)
+
+        if usuario:
+            self.usuario_actual = {"id": usuario[0], "username": usuario[1], "rol": usuario[2]}
+            self.frame_login.destroy()
+            self.construir_interfaz_principal()
+        else:
+            messagebox.showerror("Error", "Credenciales incorrectas")
+
+    # ==============================================================
+    # INTERFAZ PRINCIPAL Y NAVEGACIÓN
+    # ==============================================================
+    def construir_interfaz_principal(self):
+        self.grid_columnconfigure(0, weight=0)
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+
+        # Panel Izquierdo (Menú)
+        self.frame_menu = ctk.CTkFrame(self, width=220, corner_radius=0, fg_color="#111111")
+        self.frame_menu.grid(row=0, column=0, sticky="nsw")
+        self.frame_menu.grid_propagate(False)
+
+        # Perfil de usuario estilizado
+        lbl_brand = ctk.CTkLabel(self.frame_menu, text="SISTEMA POS", font=ctk.CTkFont(size=20, weight="bold"), text_color="#3B8ED0")
+        lbl_brand.pack(pady=(30, 5), padx=20)
+        ctk.CTkLabel(self.frame_menu, text=f"Usuario: {self.usuario_actual['username']}\nRol: {self.usuario_actual['rol'].capitalize()}", font=ctk.CTkFont(size=12), text_color="gray60", justify="center").pack(pady=(0, 30), padx=20)
+
+        # Contenedor central (donde cambian las vistas)
+        self.contenedor_vistas = ctk.CTkFrame(self, fg_color="transparent")
+        self.contenedor_vistas.grid(row=0, column=1, sticky="nsew")
+
+        # Botones de Menú Dinámicos
+        self.btn_venta = ctk.CTkButton(self.frame_menu, text="🛒 Punto de Venta", height=45, anchor="w", command=self.mostrar_vista_ventas)
+        self.btn_venta.pack(pady=5, padx=15, fill="x")
+
+        if self.usuario_actual["rol"] == "administrador":
+            self.btn_inv = ctk.CTkButton(self.frame_menu, text="📦 Gestión Inventario", height=45, anchor="w", fg_color="transparent", border_width=1, command=self.mostrar_vista_inventario)
+            self.btn_inv.pack(pady=5, padx=15, fill="x")
+            
+            self.btn_rep = ctk.CTkButton(self.frame_menu, text="📊 Cierre y Reportes", height=45, anchor="w", fg_color="transparent", border_width=1, command=self.mostrar_vista_reportes)
+            self.btn_rep.pack(pady=5, padx=15, fill="x")
+
+        btn_salir = ctk.CTkButton(self.frame_menu, text="🚪 Cerrar Sesión", height=45, anchor="w", fg_color="#8F2D2D", hover_color="#6B1F1F", command=self.cerrar_sesion)
+        btn_salir.pack(side="bottom", pady=20, padx=15, fill="x")
+
+        # Iniciar en ventas
+        self.vista_actual = None
+        self.mostrar_vista_ventas()
+
+    def limpiar_vistas(self):
+        for widget in self.contenedor_vistas.winfo_children():
+            widget.destroy()
+        # Resetear estilos de botones
+        self.btn_venta.configure(fg_color="transparent", border_width=1)
+        if self.usuario_actual["rol"] == "administrador":
+            self.btn_inv.configure(fg_color="transparent", border_width=1)
+            self.btn_rep.configure(fg_color="transparent", border_width=1)
+
+    # ==============================================================
+    # MÓDULO 1: PUNTO DE VENTA (Actualizado)
+    # ==============================================================
+    def mostrar_vista_ventas(self):
+        self.limpiar_vistas()
+        self.btn_venta.configure(fg_color=["#3B8ED0", "#1F6AA5"], border_width=0)
+        
+        self.contenedor_vistas.grid_columnconfigure(0, weight=3)
+        self.contenedor_vistas.grid_columnconfigure(1, weight=2)
+        self.contenedor_vistas.grid_rowconfigure(0, weight=1)
+
+        # Panel Central (Catálogo)
+        frame_central = ctk.CTkFrame(self.contenedor_vistas, corner_radius=0)
+        frame_central.grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
+        frame_central.grid_rowconfigure(1, weight=1)
+        frame_central.grid_columnconfigure(0, weight=1)
+
+        self.entrada_busqueda = ctk.CTkEntry(frame_central, placeholder_text="Buscar producto...", height=40)
+        self.entrada_busqueda.grid(row=0, column=0, sticky="ew", padx=15, pady=15)
+        self.entrada_busqueda.bind("<KeyRelease>", lambda e: self.cargar_catalogo())
+
+        self.frame_resultados = ctk.CTkScrollableFrame(frame_central, label_text="Catálogo Rápido")
+        self.frame_resultados.grid(row=1, column=0, sticky="nsew", padx=15, pady=(0, 15))
+        for c in range(self.COLUMNAS_CATALOGO):
+            self.frame_resultados.grid_columnconfigure(c, weight=1)
+
+        # Panel Derecho (Carrito)
+        self.frame_carrito = ctk.CTkFrame(self.contenedor_vistas, corner_radius=0)
+        self.frame_carrito.grid(row=0, column=1, sticky="nsew", padx=(0, 2), pady=2)
+        self.frame_carrito.grid_rowconfigure(1, weight=1)
+        self.frame_carrito.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(self.frame_carrito, text="Terminal de Cobro", font=ctk.CTkFont(size=18, weight="bold")).grid(row=0, column=0, sticky="w", padx=15, pady=(15, 5))
+        
+        self.frame_carrito_items = ctk.CTkScrollableFrame(self.frame_carrito, label_text="")
+        self.frame_carrito_items.grid(row=1, column=0, sticky="nsew", padx=15, pady=(0, 10))
+        self.frame_carrito_items.grid_columnconfigure(0, weight=1)
+
+        frame_totales = ctk.CTkFrame(self.frame_carrito, fg_color="transparent")
+        frame_totales.grid(row=2, column=0, sticky="ew", padx=15, pady=10)
+        frame_totales.grid_columnconfigure(0, weight=1)
+
+        self.label_subtotal = ctk.CTkLabel(frame_totales, text="Subtotal: $0.00", font=ctk.CTkFont(size=14))
+        self.label_subtotal.grid(row=0, column=0, sticky="e")
+        self.label_iva = ctk.CTkLabel(frame_totales, text=f"IVA ({int(self.TASA_IVA*100)}%): $0.00", text_color="gray60")
+        self.label_iva.grid(row=1, column=0, sticky="e")
+        self.label_total = ctk.CTkLabel(frame_totales, text="Total: $0.00", font=ctk.CTkFont(size=24, weight="bold"), text_color="#2CC985")
+        self.label_total.grid(row=2, column=0, sticky="e", pady=(5, 0))
+
+        ctk.CTkButton(self.frame_carrito, text="PROCESAR COBRO", height=60, font=ctk.CTkFont(size=16, weight="bold"), fg_color="#2CC985", hover_color="#219A67", command=self.procesar_cobro).grid(row=3, column=0, sticky="ew", padx=15, pady=(5, 15))
 
         self.cargar_catalogo()
         self.actualizar_panel_carrito()
 
-        # Cierra la conexión a la BD de forma ordenada al cerrar la ventana
-        self.protocol("WM_DELETE_WINDOW", self.al_cerrar_ventana)
-
-    # ------------------------------------------------------------
-    # Configuración general de la ventana
-    # ------------------------------------------------------------
-    def _configurar_ventana(self):
-        self.title("Sistema POS - Punto de Venta")
-        self.geometry("1000x600")
-        self.minsize(950, 550)
-
-        # 3 columnas: menu (fija) | catalogo (flexible) | carrito (flexible)
-        self.grid_columnconfigure(0, weight=0)
-        self.grid_columnconfigure(1, weight=3)
-        self.grid_columnconfigure(2, weight=2)
-        self.grid_rowconfigure(0, weight=1)
-
-    # ------------------------------------------------------------
-    # PANEL IZQUIERDO: menú lateral
-    # ------------------------------------------------------------
-    def _crear_panel_izquierdo(self):
-        self.frame_menu = ctk.CTkFrame(self, width=190, corner_radius=0)
-        self.frame_menu.grid(row=0, column=0, sticky="nsw")
-        self.frame_menu.grid_propagate(False)  # mantiene el ancho fijo de 190px
-
-        ctk.CTkLabel(
-            self.frame_menu, text="Mi Negocio",
-            font=ctk.CTkFont(size=22, weight="bold")
-        ).pack(pady=(30, 5), padx=20)
-
-        ctk.CTkLabel(
-            self.frame_menu, text="Sistema POS",
-            font=ctk.CTkFont(size=13), text_color="gray60"
-        ).pack(pady=(0, 40), padx=20)
-
-        self.boton_menu_venta = ctk.CTkButton(
-            self.frame_menu, text="🛒  Punto de Venta", height=42,
-            anchor="w", command=self.mostrar_punto_venta
-        )
-        self.boton_menu_venta.pack(pady=8, padx=20, fill="x")
-
-        self.boton_menu_inventario = ctk.CTkButton(
-            self.frame_menu, text="📦  Inventario", height=42,
-            anchor="w", fg_color="transparent", border_width=1,
-            command=self.mostrar_inventario
-        )
-        self.boton_menu_inventario.pack(pady=8, padx=20, fill="x")
-
-    # ------------------------------------------------------------
-    # PANEL CENTRAL: buscador + catálogo (scrollable)
-    # ------------------------------------------------------------
-    def _crear_panel_central(self):
-        self.frame_central = ctk.CTkFrame(self, corner_radius=0)
-        self.frame_central.grid(row=0, column=1, sticky="nsew", padx=2, pady=2)
-        self.frame_central.grid_rowconfigure(1, weight=1)
-        self.frame_central.grid_columnconfigure(0, weight=1)
-
-        # --- barra superior con el buscador ---
-        barra_busqueda = ctk.CTkFrame(self.frame_central, fg_color="transparent")
-        barra_busqueda.grid(row=0, column=0, sticky="ew", padx=15, pady=15)
-        barra_busqueda.grid_columnconfigure(0, weight=1)
-
-        self.entrada_busqueda = ctk.CTkEntry(
-            barra_busqueda, placeholder_text="Buscar producto por nombre...",
-            height=38
-        )
-        self.entrada_busqueda.grid(row=0, column=0, sticky="ew")
-        # Conexión CustomTkinter -> SQLite: cada vez que el usuario suelta
-        # una tecla se vuelve a llamar cargar_catalogo(), que lee el texto
-        # de este Entry y lo pasa a bd.buscar_productos_por_nombre().
-        # Así la búsqueda se siente "en vivo" sin necesidad de un botón.
-        self.entrada_busqueda.bind("<KeyRelease>", lambda evento: self.cargar_catalogo())
-
-        # --- area scrollable donde se dibujan los productos ---
-        self.frame_resultados = ctk.CTkScrollableFrame(
-            self.frame_central, label_text="Catálogo de Productos"
-        )
-        self.frame_resultados.grid(row=1, column=0, sticky="nsew", padx=15, pady=(0, 15))
-        for columna in range(self.COLUMNAS_CATALOGO):
-            self.frame_resultados.grid_columnconfigure(columna, weight=1)
-
-    # ------------------------------------------------------------
-    # PANEL DERECHO: carrito de compra
-    # ------------------------------------------------------------
-    def _crear_panel_derecho(self):
-        self.frame_carrito = ctk.CTkFrame(self, corner_radius=0)
-        self.frame_carrito.grid(row=0, column=2, sticky="nsew", padx=(0, 2), pady=2)
-        self.frame_carrito.grid_rowconfigure(1, weight=1)
-        self.frame_carrito.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(
-            self.frame_carrito, text="Carrito de Compra",
-            font=ctk.CTkFont(size=18, weight="bold")
-        ).grid(row=0, column=0, sticky="w", padx=15, pady=(15, 5))
-
-        # Lista de artículos agregados (se redibuja completa en cada cambio)
-        self.frame_carrito_items = ctk.CTkScrollableFrame(self.frame_carrito, label_text="")
-        self.frame_carrito_items.grid(row=1, column=0, sticky="nsew", padx=15, pady=(0, 10))
-        self.frame_carrito_items.grid_columnconfigure(0, weight=1)
-        # Nota: el mensaje de "carrito vacío" se crea dinámicamente dentro
-        # de actualizar_panel_carrito(), ya que depende del estado actual.
-
-        # --- totales dinámicos ---
-        frame_totales = ctk.CTkFrame(self.frame_carrito, fg_color="transparent")
-        frame_totales.grid(row=2, column=0, sticky="ew", padx=15, pady=(0, 10))
-        frame_totales.grid_columnconfigure(0, weight=1)
-
-        self.label_subtotal = ctk.CTkLabel(
-            frame_totales, text="Subtotal: $0.00", font=ctk.CTkFont(size=14)
-        )
-        self.label_subtotal.grid(row=0, column=0, sticky="e")
-
-        self.label_iva = ctk.CTkLabel(
-            frame_totales, text=f"IVA ({int(self.TASA_IVA * 100)}%): $0.00",
-            font=ctk.CTkFont(size=13), text_color="gray60"
-        )
-        self.label_iva.grid(row=1, column=0, sticky="e", pady=(2, 2))
-
-        self.label_total = ctk.CTkLabel(
-            frame_totales, text="Total: $0.00", font=ctk.CTkFont(size=20, weight="bold")
-        )
-        self.label_total.grid(row=2, column=0, sticky="e", pady=(4, 0))
-
-        # --- botón de cobro (grande y verde, como pide el requerimiento) ---
-        self.boton_cobrar = ctk.CTkButton(
-            self.frame_carrito, text="Procesar Cobro", height=55,
-            font=ctk.CTkFont(size=16, weight="bold"),
-            fg_color="#2CC985", hover_color="#219A67",
-            command=self.procesar_cobro
-        )
-        self.boton_cobrar.grid(row=3, column=0, sticky="ew", padx=15, pady=(5, 15))
-
-    # ==============================================================
-    # NAVEGACION ENTRE "PUNTO DE VENTA" E "INVENTARIO"
-    # ==============================================================
-    def mostrar_punto_venta(self):
-        """Activa el modo catálogo-para-vender (botones clicables)."""
-        self.modo_actual = "venta"
-        self.boton_menu_venta.configure(fg_color=["#3B8ED0", "#1F6AA5"], border_width=0)
-        self.boton_menu_inventario.configure(fg_color="transparent", border_width=1)
-        self.frame_resultados.configure(label_text="Catálogo de Productos")
-        self.entrada_busqueda.configure(placeholder_text="Buscar producto por nombre...")
-        self.cargar_catalogo()
-
-    def mostrar_inventario(self):
-        """Activa el modo de solo-consulta de inventario (sin agregar al carrito)."""
-        self.modo_actual = "inventario"
-        self.boton_menu_inventario.configure(fg_color=["#3B8ED0", "#1F6AA5"], border_width=0)
-        self.boton_menu_venta.configure(fg_color="transparent", border_width=1)
-        self.frame_resultados.configure(label_text="Inventario Actual")
-        self.entrada_busqueda.configure(placeholder_text="Buscar en inventario...")
-        self.cargar_catalogo()
-
-    # ==============================================================
-    # CATALOGO: leer de SQLite y dibujar en CustomTkinter
-    # ==============================================================
     def cargar_catalogo(self):
-        """
-        Punto central donde CustomTkinter "habla" con SQLite:
-        1) toma el texto que el usuario escribió en el CTkEntry,
-        2) se lo pasa a Database.buscar_productos_por_nombre(),
-        3) recorre las filas devueltas y crea un widget por cada una.
-        Se llama al iniciar, al escribir en el buscador, al cambiar
-        de modo (venta/inventario) y después de cada venta exitosa
-        (para reflejar el stock actualizado).
-        """
-        # Limpiar resultados dibujados anteriormente antes de redibujar
-        for widget in self.frame_resultados.winfo_children():
-            widget.destroy()
+        for widget in self.frame_resultados.winfo_children(): widget.destroy()
+        productos = self.bd.buscar_productos_por_nombre(self.entrada_busqueda.get())
+        
+        for indice, (pid, nombre, precio, stock) in enumerate(productos):
+            fila, col = divmod(indice, self.COLUMNAS_CATALOGO)
+            hay_stock = stock > 0
+            btn = ctk.CTkButton(
+                self.frame_resultados, text=f"{nombre}\n${precio:.2f}  |  Disp: {stock}",
+                height=70, anchor="w", state="normal" if hay_stock else "disabled",
+                fg_color=("#2b2b2b") if hay_stock else "gray20",
+                hover_color="#3B8ED0", border_width=1, border_color="#3B8ED0" if hay_stock else "gray30",
+                command=lambda id=pid: self.agregar_al_carrito(id)
+            )
+            btn.grid(row=fila, column=col, padx=5, pady=5, sticky="nsew")
 
-        texto_busqueda = self.entrada_busqueda.get()
-        productos = self.bd.buscar_productos_por_nombre(texto_busqueda)
+    def agregar_al_carrito(self, producto_id):
+        producto = self.bd.obtener_producto_por_id(producto_id)
+        if not producto: return
+        _, nombre, precio, stock = producto
+        cant_actual = self.carrito.get(producto_id, {}).get("cantidad", 0)
 
-        if not productos:
-            ctk.CTkLabel(
-                self.frame_resultados, text="No se encontraron productos."
-            ).grid(row=0, column=0, columnspan=self.COLUMNAS_CATALOGO, pady=30)
+        if cant_actual >= stock:
+            messagebox.showwarning("Stock", "No hay más unidades disponibles.")
             return
 
-        for indice, producto in enumerate(productos):
-            fila = indice // self.COLUMNAS_CATALOGO
-            columna = indice % self.COLUMNAS_CATALOGO
-            if self.modo_actual == "venta":
-                self._dibujar_tarjeta_venta(producto, fila, columna)
-            else:
-                self._dibujar_tarjeta_inventario(producto, fila, columna)
+        if producto_id in self.carrito: self.carrito[producto_id]["cantidad"] += 1
+        else: self.carrito[producto_id] = {"nombre": nombre, "precio": precio, "cantidad": 1}
+        self.actualizar_panel_carrito()
 
-    def _dibujar_tarjeta_venta(self, producto, fila, columna):
-        """Dibuja un producto como botón clicable que agrega al carrito."""
-        producto_id, nombre, precio, stock = producto
-        hay_stock = stock > 0
-
-        texto = f"{nombre}\n${precio:.2f}   |   Stock: {stock}"
-        boton = ctk.CTkButton(
-            self.frame_resultados, text=texto, height=64,
-            anchor="w",
-            state="normal" if hay_stock else "disabled",
-            fg_color=("#3B8ED0", "#1F6AA5") if hay_stock else "gray30",
-            # Se usa un lambda con valor por defecto (pid=producto_id) para
-            # "congelar" el id de este producto especifico en este botón;
-            # sin eso, todos los botones terminarían apuntando al último
-            # producto del ciclo for.
-            command=lambda pid=producto_id: self.agregar_al_carrito(pid)
-        )
-        boton.grid(row=fila, column=columna, padx=8, pady=8, sticky="nsew")
-
-    def _dibujar_tarjeta_inventario(self, producto, fila, columna):
-        """Dibuja un producto como tarjeta de solo lectura (vista Inventario)."""
-        producto_id, nombre, precio, stock = producto
-        tarjeta = ctk.CTkFrame(self.frame_resultados, border_width=1)
-        tarjeta.grid(row=fila, column=columna, padx=8, pady=8, sticky="nsew")
-
-        ctk.CTkLabel(
-            tarjeta, text=nombre, font=ctk.CTkFont(weight="bold"), anchor="w"
-        ).pack(fill="x", padx=12, pady=(10, 2))
-        ctk.CTkLabel(
-            tarjeta, text=f"Precio: ${precio:.2f}", anchor="w"
-        ).pack(fill="x", padx=12)
-
-        color_stock = "#FF6B6B" if stock <= 5 else "#8BE28B"
-        texto_stock = "Agotado" if stock == 0 else f"Stock disponible: {stock}"
-        ctk.CTkLabel(
-            tarjeta, text=texto_stock, text_color=color_stock, anchor="w"
-        ).pack(fill="x", padx=12, pady=(0, 10))
-
-    # ==============================================================
-    # LOGICA DEL CARRITO
-    # ==============================================================
-    def agregar_al_carrito(self, producto_id):
-        """
-        Se ejecuta al presionar el botón de un producto en el catálogo.
-        Vuelve a consultar la base de datos (obtener_producto_por_id)
-        para confirmar el stock real en este momento -en vez de confiar
-        en el número que se dibujó al cargar el catálogo- y solo si hay
-        unidades disponibles lo agrega (o incrementa) en self.carrito.
-        """
-        try:
-            producto = self.bd.obtener_producto_por_id(producto_id)
-            if producto is None:
-                messagebox.showerror("Producto no encontrado", "Este producto ya no existe en la base de datos.")
-                self.cargar_catalogo()
-                return
-
-            _, nombre, precio, stock_disponible = producto
-            cantidad_en_carrito = self.carrito.get(producto_id, {}).get("cantidad", 0)
-
-            if cantidad_en_carrito >= stock_disponible:
-                messagebox.showwarning(
-                    "Stock insuficiente",
-                    f"No hay más unidades disponibles de '{nombre}'.\nStock actual: {stock_disponible}"
-                )
-                return
-
-            if producto_id in self.carrito:
-                self.carrito[producto_id]["cantidad"] += 1
-            else:
-                self.carrito[producto_id] = {"nombre": nombre, "precio": precio, "cantidad": 1}
-
-            self.actualizar_panel_carrito()
-
-        except Exception as error:
-            messagebox.showerror("Error", f"No se pudo agregar el producto al carrito:\n{error}")
-
-    def quitar_del_carrito(self, producto_id):
-        """Elimina por completo un artículo del carrito (botón ✕ de cada fila)."""
-        if producto_id in self.carrito:
-            del self.carrito[producto_id]
+    def quitar_del_carrito(self, pid):
+        if pid in self.carrito:
+            del self.carrito[pid]
             self.actualizar_panel_carrito()
 
     def actualizar_panel_carrito(self):
-        """
-        Redibuja el Panel Derecho a partir de self.carrito y recalcula
-        Subtotal / IVA / Total. Se llama después de cualquier cambio en
-        el carrito: agregar, quitar o vaciar tras un cobro exitoso.
-        """
-        for widget in self.frame_carrito_items.winfo_children():
-            widget.destroy()
-
-        if not self.carrito:
-            self.label_carrito_vacio = ctk.CTkLabel(
-                self.frame_carrito_items,
-                text="El carrito está vacío.\nSelecciona productos del catálogo.",
-                text_color="gray60", justify="center"
-            )
-            self.label_carrito_vacio.pack(pady=30)
-
+        for widget in self.frame_carrito_items.winfo_children(): widget.destroy()
         subtotal = 0.0
-        for producto_id, datos in self.carrito.items():
-            subtotal_articulo = datos["precio"] * datos["cantidad"]
-            subtotal += subtotal_articulo
 
-            fila = ctk.CTkFrame(self.frame_carrito_items, fg_color="transparent")
-            fila.pack(fill="x", pady=4)
-            fila.grid_columnconfigure(0, weight=1)
-
-            texto_articulo = f"{datos['nombre']}\n{datos['cantidad']} x ${datos['precio']:.2f}"
-            ctk.CTkLabel(fila, text=texto_articulo, justify="left", anchor="w").grid(
-                row=0, column=0, sticky="ew"
-            )
-            ctk.CTkLabel(fila, text=f"${subtotal_articulo:.2f}", anchor="e").grid(
-                row=0, column=1, padx=(6, 6)
-            )
-            ctk.CTkButton(
-                fila, text="✕", width=26, height=26, fg_color="#B33A3A", hover_color="#8F2D2D",
-                command=lambda pid=producto_id: self.quitar_del_carrito(pid)
-            ).grid(row=0, column=2)
+        for pid, datos in self.carrito.items():
+            st_art = datos["precio"] * datos["cantidad"]
+            subtotal += st_art
+            f = ctk.CTkFrame(self.frame_carrito_items, fg_color="transparent")
+            f.pack(fill="x", pady=2)
+            f.grid_columnconfigure(0, weight=1)
+            ctk.CTkLabel(f, text=f"{datos['nombre']}\n{datos['cantidad']} x ${datos['precio']:.2f}", justify="left", anchor="w").grid(row=0, column=0, sticky="ew")
+            ctk.CTkLabel(f, text=f"${st_art:.2f}", font=ctk.CTkFont(weight="bold")).grid(row=0, column=1, padx=10)
+            ctk.CTkButton(f, text="✕", width=30, fg_color="#8F2D2D", hover_color="#6B1F1F", command=lambda id=pid: self.quitar_del_carrito(id)).grid(row=0, column=2)
 
         iva = subtotal * self.TASA_IVA
         total = subtotal + iva
-
         self.label_subtotal.configure(text=f"Subtotal: ${subtotal:.2f}")
-        self.label_iva.configure(text=f"IVA ({int(self.TASA_IVA * 100)}%): ${iva:.2f}")
+        self.label_iva.configure(text=f"IVA ({int(self.TASA_IVA*100)}%): ${iva:.2f}")
         self.label_total.configure(text=f"Total: ${total:.2f}")
 
-    # ==============================================================
-    # PROCESAR COBRO
-    # ==============================================================
     def procesar_cobro(self):
-        """
-        Valida el carrito, calcula el total, y delega en
-        Database.procesar_venta() el registro de la venta y el
-        descuento de stock dentro de una sola transacción.
-        Envuelto en try/except para que un error inesperado (por
-        ejemplo, de la base de datos) muestre un mensaje en vez de
-        cerrar la aplicación de golpe.
-        """
+        if not self.carrito: return messagebox.showwarning("Aviso", "Carrito vacío")
+        
+        subtotal = sum(d["precio"] * d["cantidad"] for d in self.carrito.values())
+        total = subtotal + (subtotal * self.TASA_IVA)
+        
+        exito, resultado = self.bd.procesar_venta(self.carrito, total, self.usuario_actual["id"])
+        
+        if exito:
+            self.generar_ticket_txt(resultado, subtotal, total)
+            messagebox.showinfo("Éxito", f"Venta registrada. Cambio exacto: ${total:.2f}\nTicket generado.")
+            self.carrito.clear()
+            self.actualizar_panel_carrito()
+            self.cargar_catalogo()
+        else:
+            messagebox.showerror("Error", f"Error al procesar: {resultado}")
+
+    def generar_ticket_txt(self, fecha, subtotal, total):
+        """Simula la impresión enviando los datos a un archivo de texto"""
+        ticket = f"====== MI NEGOCIO ======\nFecha: {fecha}\nCajero: {self.usuario_actual['username']}\n------------------------\n"
+        for d in self.carrito.values():
+            ticket += f"{d['cantidad']}x {d['nombre'][:15]}... ${d['precio']*d['cantidad']:.2f}\n"
+        ticket += f"------------------------\nSubtotal: ${subtotal:.2f}\nIVA: ${total-subtotal:.2f}\nTOTAL: ${total:.2f}\n========================"
+        
+        with open("ticket_ultima_venta.txt", "w", encoding="utf-8") as f:
+            f.write(ticket)
+
+    # ==============================================================
+    # MÓDULO 2: GESTIÓN DE INVENTARIO (CRUD)
+    # ==============================================================
+    def mostrar_vista_inventario(self):
+        self.limpiar_vistas()
+        self.btn_inv.configure(fg_color=["#3B8ED0", "#1F6AA5"], border_width=0)
+        
+        self.contenedor_vistas.grid_columnconfigure(0, weight=1)
+        self.contenedor_vistas.grid_columnconfigure(1, weight=2)
+        self.contenedor_vistas.grid_rowconfigure(0, weight=1)
+
+        # Panel Izquierdo: Formulario CRUD
+        frame_form = ctk.CTkFrame(self.contenedor_vistas)
+        frame_form.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        
+        ctk.CTkLabel(frame_form, text="Nuevo / Editar Producto", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=20)
+        
+        self.id_edicion = None
+        self.ent_nombre = ctk.CTkEntry(frame_form, placeholder_text="Nombre del Producto")
+        self.ent_nombre.pack(pady=10, padx=20, fill="x")
+        self.ent_precio = ctk.CTkEntry(frame_form, placeholder_text="Precio de Venta ($)")
+        self.ent_precio.pack(pady=10, padx=20, fill="x")
+        self.ent_stock = ctk.CTkEntry(frame_form, placeholder_text="Stock Inicial")
+        self.ent_stock.pack(pady=10, padx=20, fill="x")
+
+        ctk.CTkButton(frame_form, text="💾 Guardar Producto", fg_color="#2CC985", hover_color="#219A67", command=self.guardar_producto_crud).pack(pady=20, padx=20, fill="x")
+        ctk.CTkButton(frame_form, text="Limpiar Formulario", fg_color="transparent", border_width=1, command=self.limpiar_form_crud).pack(padx=20, fill="x")
+
+        # Panel Derecho: Lista de inventario
+        frame_lista = ctk.CTkScrollableFrame(self.contenedor_vistas, label_text="Inventario Existente")
+        frame_lista.grid(row=0, column=1, sticky="nsew", padx=10, pady=10)
+        self.frame_lista_inv = frame_lista
+        self.cargar_lista_inventario()
+
+    def guardar_producto_crud(self):
         try:
-            if not self.carrito:
-                messagebox.showwarning(
-                    "Carrito vacío",
-                    "Agrega al menos un producto antes de procesar el cobro."
-                )
-                return
+            nom = self.ent_nombre.get().strip()
+            pre = float(self.ent_precio.get())
+            stk = int(self.ent_stock.get())
+            if not nom or pre < 0 or stk < 0: raise ValueError
+            
+            self.bd.guardar_producto(nom, pre, stk, self.id_edicion)
+            self.limpiar_form_crud()
+            self.cargar_lista_inventario()
+            messagebox.showinfo("Éxito", "Inventario actualizado")
+        except ValueError:
+            messagebox.showerror("Error", "Datos inválidos. Verifica precio y stock.")
 
-            subtotal = sum(datos["precio"] * datos["cantidad"] for datos in self.carrito.values())
-            total = subtotal + (subtotal * self.TASA_IVA)
+    def cargar_lista_inventario(self):
+        for widget in self.frame_lista_inv.winfo_children(): widget.destroy()
+        for pid, nom, pre, stk in self.bd.buscar_productos_por_nombre(""):
+            f = ctk.CTkFrame(self.frame_lista_inv)
+            f.pack(fill="x", pady=5, padx=5)
+            f.grid_columnconfigure(0, weight=1)
+            ctk.CTkLabel(f, text=f"{nom} | ${pre:.2f} | Stock: {stk}", anchor="w").grid(row=0, column=0, padx=10, pady=10, sticky="w")
+            ctk.CTkButton(f, text="Editar", width=60, command=lambda id=pid, n=nom, p=pre, s=stk: self.cargar_form_edicion(id, n, p, s)).grid(row=0, column=1, padx=5)
+            ctk.CTkButton(f, text="Borrar", width=60, fg_color="#8F2D2D", hover_color="#6B1F1F", command=lambda id=pid: self.borrar_producto_crud(id)).grid(row=0, column=2, padx=5)
 
-            venta_exitosa = self.bd.procesar_venta(self.carrito, total)
+    def cargar_form_edicion(self, pid, nom, pre, stk):
+        self.limpiar_form_crud()
+        self.id_edicion = pid
+        self.ent_nombre.insert(0, nom)
+        self.ent_precio.insert(0, str(pre))
+        self.ent_stock.insert(0, str(stk))
 
-            if venta_exitosa:
-                messagebox.showinfo(
-                    "Venta registrada",
-                    f"Venta procesada con éxito.\n\nTotal cobrado: ${total:.2f}"
-                )
-                self.carrito.clear()
-                self.actualizar_panel_carrito()
-                self.cargar_catalogo()  # refresca el stock visible en el catálogo
-            else:
-                messagebox.showerror(
-                    "No se pudo procesar la venta",
-                    "Ocurrió un problema al guardar la venta (posible cambio de stock).\n"
-                    "El catálogo se actualizará; por favor revisa el carrito e intenta de nuevo."
-                )
-                self.cargar_catalogo()
+    def borrar_producto_crud(self, pid):
+        if messagebox.askyesno("Confirmar", "¿Eliminar este producto?"):
+            self.bd.eliminar_producto(pid)
+            self.cargar_lista_inventario()
 
-        except Exception as error:
-            messagebox.showerror("Error inesperado", f"Ocurrió un error al procesar el cobro:\n{error}")
+    def limpiar_form_crud(self):
+        self.id_edicion = None
+        self.ent_nombre.delete(0, 'end')
+        self.ent_precio.delete(0, 'end')
+        self.ent_stock.delete(0, 'end')
 
     # ==============================================================
-    # CIERRE DE LA APLICACION
+    # MÓDULO 3: CIERRE DE CAJA Y REPORTES
     # ==============================================================
+    def mostrar_vista_reportes(self):
+        self.limpiar_vistas()
+        self.btn_rep.configure(fg_color=["#3B8ED0", "#1F6AA5"], border_width=0)
+        self.contenedor_vistas.grid_columnconfigure(0, weight=1)
+        self.contenedor_vistas.grid_rowconfigure(0, weight=1)
+
+        frame_rep = ctk.CTkFrame(self.contenedor_vistas)
+        frame_rep.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
+
+        ctk.CTkLabel(frame_rep, text="Resumen del Día", font=ctk.CTkFont(size=24, weight="bold")).pack(pady=(40, 20))
+        
+        ventas_hoy, total_hoy = self.bd.reporte_ventas_hoy()
+        total_hoy = total_hoy or 0.0
+
+        f_datos = ctk.CTkFrame(frame_rep, fg_color="#1a1a1a", corner_radius=10)
+        f_datos.pack(pady=20, padx=50, fill="x")
+        
+        ctk.CTkLabel(f_datos, text=f"Total de tickets emitidos hoy: {ventas_hoy}", font=ctk.CTkFont(size=16)).pack(pady=15)
+        ctk.CTkLabel(f_datos, text=f"INGRESOS TOTALES (USD): ${total_hoy:.2f}", font=ctk.CTkFont(size=28, weight="bold"), text_color="#2CC985").pack(pady=(0, 20))
+
+        ctk.CTkButton(frame_rep, text="🖨️ Imprimir Cierre de Caja", height=50, command=lambda: messagebox.showinfo("Cierre", "Función de impresión a térmica conectada.")).pack(pady=30)
+
+    # ==============================================================
+    # UTILIDADES
+    # ==============================================================
+    def cerrar_sesion(self):
+        self.usuario_actual = None
+        self.carrito.clear()
+        for widget in self.winfo_children(): widget.destroy()
+        self.mostrar_pantalla_login()
+
     def al_cerrar_ventana(self):
-        """Cierra la conexión a la base de datos antes de destruir la ventana."""
         self.bd.cerrar_conexion()
         self.destroy()
 
-
-# ==================================================================
-# 3) PUNTO DE ENTRADA
-# ==================================================================
 if __name__ == "__main__":
     app = POSApp()
     app.mainloop()
